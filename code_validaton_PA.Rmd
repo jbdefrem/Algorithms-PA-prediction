@@ -1,0 +1,317 @@
+---
+title: "Validation of the PA Prediction Model"
+author: "JBF"
+date: "25/05/2022"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo   = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+## 1. Load required packages
+
+```{r libraries}
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+library(mltools)
+library(funModeling)
+library(reshape)
+library(tableone)
+library(visdat)
+library(zoo)
+library(ggridges)
+library(hrbrthemes)
+library(viridis)
+library(pastecs)
+library(skimr)
+library(hablar)
+library(GGally)
+library(corrplot)
+library(readxl)
+library(plotROC)
+```
+
+## 2. Data loading and preprocessing
+
+```{r data-loading, eval=FALSE}
+# Note: Data objects are expected to be pre-loaded in the environment
+# The following objects should be available:
+
+# Initial cohorts:
+# - HTA: Initial cohort (raw data)
+# - hta_feat: Initial cohort (binarized features)
+# - HTA_jeunes: Young patients cohort (< 65 years)
+# - hta_feat_jeunes: Young patients cohort (binarized features)
+
+# External validation cohort:
+# - bordeaux: External validation dataset (raw data)
+# - bordeaux_feat: External validation dataset (binarized features)
+
+# Probability groups
+# - groupe_proba : probability of each group
+# - groupe_proba_hegp : groups of patients of hegp
+# - groupe_proba_bordaeux : groups of patients of bordeaux
+```
+
+
+## 4. Internal validation on HEGP cohort
+
+### 4.1. Predicted classification (with treatment)
+
+```{r eval-hegp}
+seuil <- 0.29
+
+diag_predit_patient_eval <- hta_feat %>% 
+  dplyr::select(hap, ka_1, htar, age_1, age_3) %>% 
+  mutate(id = row_number()) %>% 
+  filter(age_3 == 0) %>% 
+  left_join(
+    groupes_proba_hegp_hap %>% dplyr::select(id, proba_HAP),
+    by = "id"
+  ) %>% 
+  mutate(
+    proba_HAP = if_else(is.na(proba_HAP), 0, proba_HAP)
+  ) %>%
+  drop_na(proba_HAP) %>% 
+  mutate(
+    diag_predit = proba_HAP / 100 > seuil,
+    diag_predit = as.factor(diag_predit)
+  ) %>% 
+  mutate(across(c(ka_1, htar, age_1), as.numeric)) %>% 
+  mutate(
+    ka_1 = if_else(is.na(ka_1), 0, ka_1),
+    htar = if_else(is.na(htar), 0, htar),
+    age_1 = if_else(is.na(age_1), 0, age_1)
+  ) %>% 
+  mutate(across(c(ka_1, htar, age_1), as.numeric)) %>% 
+  mutate(
+    indic = if_else((ka_1 == 0 | htar == 1 | age_1 == 0), 1, 0)
+  )
+```
+
+### 4.2. Predicted classification (without treatment)
+
+```{r eval-hegp-sans-ttt}
+diag_predit_patient_eval_sans_ttt <- hta_feat %>% 
+  dplyr::select(hap, ka_1, htar, age_1, age_3) %>% 
+  mutate(id = row_number()) %>% 
+  filter(age_3 == 0) %>% 
+  left_join(
+    groupes_proba_hegp_sans_ttt %>% dplyr::select(id, proba_HAP),
+    by = "id"
+  ) %>% 
+  mutate(
+    proba_HAP = if_else(is.na(proba_HAP), 0, proba_HAP)
+  ) %>%
+  drop_na(proba_HAP) %>% 
+  mutate(diag_predit = proba_HAP / 100 > seuil) %>% 
+  convert(num(ka_1, htar, age_1)) %>% 
+  mutate(
+    ka_1 = if_else(is.na(ka_1), 0, ka_1),
+    htar = if_else(is.na(htar), 0, htar),
+    age_1 = if_else(is.na(age_1), 0, age_1)
+  ) %>% 
+  convert(fct(ka_1, htar, age_1)) %>% 
+  mutate(
+    indic = if_else((ka_1 == 0 | htar == 1 | age_1 == 0), 1, 0)
+  )
+```
+
+### 4.3. ROC curve and AUC (internal validation with treatment)
+
+```{r roc-hegp}
+ROC <- diag_predit_patient_eval %>% 
+  dplyr::select(hap, proba_HAP) %>% 
+  mutate(
+    proba_HAP = proba_HAP / 100,
+    hap = as.numeric(hap)
+  )
+
+rocplot <- ggplot(ROC, aes(m = proba_HAP, d = hap)) +
+  geom_roc(n.cuts = 0, labelsize = 3, labelround = 2)
+
+rocplot +
+  style_roc(xlab = "1-specificity", ylab = "sensitivity", theme = theme_bw) +
+  geom_rocci(fill = "pink") +
+  annotate("text", x = 0.5, y = 0.5, label = "AUC = 0.80", color = "black", size = 6) +
+  theme(
+    axis.title = element_text(size = 18),
+    axis.text  = element_text(size = 14)
+  )
+
+calc_auc(rocplot)
+```
+
+### 4.4. Confusion matrices (internal validation)
+
+```{r confmat-hegp}
+indic <- diag_predit_patient_eval$indic
+truth <- diag_predit_patient_eval$hap
+
+# Screening rule vs ground truth
+conf_mat_indic <- conf_mat(table(indic, truth))
+conf_mat_indic
+
+# Model prediction vs ground truth
+pred  <- as.numeric(diag_predit_patient_eval$diag_predit) - 1
+truth <- as.numeric(diag_predit_patient_eval$hap)
+
+conf_mat_pred <- conf_mat(table(pred, truth))
+conf_mat_pred
+summary(conf_mat(table(pred, truth)), event_level = "second")
+```
+
+### 4.5. Case review (internal validation)
+
+```{r subgroups-hegp}
+diag_predit_patient_eval %>% filter(indic == 1 & hap == 1)
+diag_predit_patient_eval %>% filter(diag_predit == 1)
+diag_predit_patient_eval %>% filter(diag_predit == FALSE & indic == 0 & hap == 0)
+diag_predit_patient_eval %>% filter(diag_predit == 1 & hap == 1 & indic == 0)
+diag_predit_patient_eval %>% filter(diag_predit == 0 & indic == 1)
+diag_predit_patient_eval %>% filter(indic == 0 & hap == 1)
+```
+
+### 4.6. ROC curve (internal validation without treatment)
+
+```{r roc-hegp-sans-ttt}
+ROC_sans_ttt <- diag_predit_patient_eval_sans_ttt %>% 
+  dplyr::select(hap, proba_HAP) %>% 
+  mutate(
+    proba_HAP = proba_HAP / 100
+  ) %>% 
+  convert(num(hap))
+
+rocplot_sans_ttt <- ggplot(ROC_sans_ttt, aes(m = proba_HAP, d = hap)) +
+  geom_roc(n.cuts = 20, labelsize = 3, labelround = 2)
+
+rocplot_sans_ttt +
+  style_roc(xlab = "1-specificity", ylab = "sensitivity", theme = theme_bw) +
+  geom_rocci(fill = "pink")
+
+calc_auc(rocplot_sans_ttt)
+```
+
+## 5. External validation: Bordeaux cohort
+
+### 5.1. Cluster prediction mapping
+
+```{r data-groupes-bordeaux}
+groupes_proba_bordeaux_hap <- read_csv("groupes_proba_bordeaux.csv") %>% 
+  left_join(groupes_proba_value, by = "name") %>% 
+  group_by(id) %>%  
+  drop_na(proba_HAP) %>% 
+  filter(proba_HAP == max(proba_HAP))
+```
+
+### 5.2. Compute predicted diagnosis based on threshold
+
+```{r eval-bordeaux}
+diag_predit_patient_bordeaux <- bordeaux_feat %>% 
+  dplyr::select(hap, ka_1, htar, age_1, age_3, hap, sexe) %>% 
+  mutate(id = row_number()) %>% 
+  left_join(
+    groupes_proba_bordeaux_hap %>% dplyr::select(id, name, proba_HAP),
+    by = "id"
+  ) %>% 
+  mutate(
+    proba_HAP = if_else(is.na(proba_HAP), 0, proba_HAP)
+  ) %>% 
+  drop_na(proba_HAP) %>% 
+  mutate(
+    diag_predit = as.numeric(proba_HAP / 100 > seuil)
+  ) %>% 
+  mutate(across(c(ka_1, htar, age_1), as.numeric)) %>% 
+  mutate(
+    ka_1 = if_else(is.na(ka_1), 0, ka_1),
+    htar = if_else(is.na(htar), 0, htar),
+    age_1 = if_else(is.na(age_1), 0, age_1)
+  ) %>% 
+  mutate(across(c(ka_1, htar, age_1), ~ as.numeric(.) - 1)) %>% 
+  mutate(
+    indic = if_else((ka_1 == 0 | htar == 1 | age_1 == 0), 1, 0),
+    sexe  = if_else(sexe == "H", "1", sexe)
+  )
+
+diag_predit_patient_bordeaux_hommes <- diag_predit_patient_bordeaux %>% 
+  filter(sexe == 1)
+
+diag_predit_patient_bordeaux_femmes <- diag_predit_patient_bordeaux %>% 
+  filter(sexe == 0)
+```
+
+### 5.3. ROC curve and AUC (external validation)
+
+```{r roc-bordeaux}
+ROC_bordeaux <- diag_predit_patient_bordeaux %>% 
+  dplyr::select(hap, proba_HAP) %>% 
+  mutate(
+    proba_HAP = proba_HAP / 100,
+    hap = as.numeric(hap)
+  )
+
+rocplot_bordeaux <- ggplot(ROC_bordeaux, aes(m = proba_HAP, d = hap)) +
+  geom_roc(n.cuts = 30, labelsize = 3, labelround = 2)
+
+rocplot_bordeaux +
+  style_roc(theme = theme_grey()) +
+  geom_rocci(fill = "pink")
+
+calc_auc(rocplot_bordeaux)
+```
+
+### 5.4. Confusion matrices: overall and sex-stratified
+
+```{r confmat-bordeaux}
+indic_bdx <- diag_predit_patient_bordeaux$indic
+truth_bdx <- diag_predit_patient_bordeaux$hap
+
+# Missed HAP cases despite indication
+diag_predit_patient_bordeaux %>% filter(diag_predit == 0 & hap == 1)
+
+# Indication vs true diagnosis
+conf_mat(table(indic_bdx, truth_bdx))
+
+# Prediction vs true diagnosis
+pred_bdx  <- diag_predit_patient_bordeaux$diag_predit
+truth_bdx <- diag_predit_patient_bordeaux$hap
+
+conf_mat(table(truth_bdx, pred_bdx))
+summary(conf_mat(table(truth_bdx, pred_bdx)))
+
+# Male subgroup
+pred_hommes  <- diag_predit_patient_bordeaux_hommes$diag_predit
+truth_hommes <- diag_predit_patient_bordeaux_hommes$hap
+
+conf_mat(table(truth_hommes, pred_hommes))
+summary(conf_mat(table(truth_hommes, pred_hommes)))
+
+# Female subgroup
+pred_femmes  <- diag_predit_patient_bordeaux_femmes$diag_predit
+truth_femmes <- diag_predit_patient_bordeaux_femmes$hap
+
+conf_mat(table(truth_femmes, pred_femmes))
+summary(conf_mat(table(truth_femmes, pred_femmes)))
+```
+
+### 5.5. External validation case review
+
+```{r subgroups-bordeaux}
+diag_predit_patient_bordeaux %>% filter(indic == 1 & diag_predit == 0 & hap == 1)
+diag_predit_patient_bordeaux %>% filter(diag_predit == 1 & hap == 1)
+diag_predit_patient_bordeaux %>% filter(hap == 1)
+diag_predit_patient_bordeaux %>% filter(diag_predit == 1 & indic == 0 & hap == 1)
+diag_predit_patient_bordeaux %>% filter(diag_predit == 0 & hap == 0 & indic == 0)
+diag_predit_patient_bordeaux %>% filter(diag_predit == 0 & indic == 1)
+diag_predit_patient_bordeaux %>% filter(diag_predit == 0 & indic == 1 & hap == 1)
+```
